@@ -1,188 +1,249 @@
-# 床垫监测 IoT 系统（mattress-iot）
+# BearPi 睡眠环境调节与卧床行为监测系统
 
-设备端通过华为云 IoTDA 上报温湿度、光照、三轴加速度、体动等属性，服务端消费数据并落库到 SQLite，提供 FastAPI 查询服务。
+> 基于 **BearPi-HM Nano + 华为云 IoTDA + FastAPI + SQLite** 的环境与卧床行为监测原型。
+> 当前处于设备联调与需求收敛阶段，本说明以后端实际代码为准。
 
-## 架构
+![Python](https://img.shields.io/badge/Python-3.14-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.163+-009688?logo=fastapi&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-WAL-003B57?logo=sqlite&logoColor=white)
+![IoTDA](https://img.shields.io/badge/Huawei_Cloud-IoTDA-C7161E?logo=huawei&logoColor=white)
 
+---
+
+## 项目简介
+
+系统由环境节点、床体节点、华为云 IoTDA 和后端服务组成：
+
+- **环境节点**：采集温度、湿度、光照和环境状态。
+- **床体节点**：采集三轴加速度、运动状态、近 10 秒体动次数和运动功率峰值。
+- **后端服务**：通过 AMQP 主动消费 IoTDA 属性上报，写入 SQLite，并向网页提供查询接口。
+- **网页端**：展示设备在线状态、最新数据、历史曲线、卧床状态和体动记录。
+
+本项目是环境与行为的记录展示原型，**不提供医疗诊断、睡眠分期或睡眠质量医学评分**。
+
+## 系统架构
+
+```text
+┌────────────────┐        ┌────────────────┐
+│ 环境节点        │        │ 床体节点        │
+│ EnvService     │        │ BedService     │
+└───────┬────────┘        └───────┬────────┘
+        └──────────┬───────────────┘
+                   │ MQTT / TLS :8883
+                   ▼
+          ┌─────────────────┐
+          │ 华为云 IoTDA     │
+          └────────┬────────┘
+                   │ AMQP / TLS :5671（后端主动订阅）
+                   ▼
+          ┌─────────────────┐       ┌──────────────────┐
+          │ FastAPI 后端     │──────▶│ SQLite / WAL     │
+          │ 消费、解析、查询  │       │ data/iot.db      │
+          └────────┬────────┘       └──────────────────┘
+                   │ HTTP /api/v1/*
+                   ▼
+          ┌─────────────────┐
+          │ 网页端           │
+          └─────────────────┘
 ```
-STM32 / ESP32 设备
-      │ MQTT (8883)
-      ▼
-华为云 IoTDA（设备接入）
-      │ AMQP (5671，服务端主动连接)
-      ▼
-本服务 backend（FastAPI + 后台消费者线程）
-      │ SQLite
-      ▼
-data/iot.db
-```
 
-- 设备与平台之间使用 MQTT，后端与平台之间使用 AMQP，后端**只需能出网访问 5671**，不需要公网 IP、域名或证书。
-- 另保留一个 HTTP 推送接口 `POST /iot/callback`，用于本地联调和带签名校验的推送场景。
+另有备用入口 `POST /iot/callback`，当前仅校验签名并打印日志，**不会写入数据库**。
 
-## 功能
+## 当前能力
 
-- AMQP 订阅 IoTDA 属性上报，断线自动重连（1s 起、15s 封顶的指数退避）。
-- 按服务解析并写入两张宽表：`EnvService → env_readings`，`BedService → bed_readings`。
-- 类型自动转换：数值字符串、浮点整数都能正确入库，转换失败记日志并写 NULL。
-- 懒建库：首次落库时自动创建目录和表；SQLite 开启 WAL，读写互不阻塞。
-- 消息解析或写库失败只记录日志，不中断消费循环。
-- 配置集中在 `.env`，真实凭证不进入 Git。
-
-## 目录结构
-
-```
-项目根/
-├── .env                  # 本地私有配置（git 忽略）
-├── .env.example          # 配置模板
-├── pyproject.toml
-├── uv.lock
-├── data/                 # 运行时生成（git 忽略）
-│   └── iot.db
-└── src/backend/
-    ├── __init__.py
-    ├── main.py           # FastAPI 入口，lifespan 中启动 AMQP 消费者
-    ├── amqp.py           # AMQP 消费者、消息解析、重连
-    ├── storage.py        # SQLite 建表与落库
-    └── routers/
-        └── iot.py        # POST /iot/callback（HTTP 推送 + 签名校验）
-```
-
-## 环境要求
-
-- Python 3.14（由 `uv` 管理）
-- [uv](https://docs.astral.sh/uv/)
-- 依赖 `python-qpid-proton==0.39.0` 已锁定：0.40 之后不再提供 Windows 预编译包，安装会要求 MSVC 编译；0.39.0 自带 `cp38-abi3` wheel，Windows 可直接使用。
+| 模块 | 状态 | 说明 |
+|------|------|------|
+| AMQP 消费 | 已实现 | 自动重连，退避间隔 1–15 秒；消息处理失败不中断消费循环 |
+| 数据入库 | 已实现 | 按服务写入两张宽表，自动建库建表，类型转换失败写 `NULL` 并告警 |
+| 设备发现 | 已实现 | 从真实上报中的 `device_id` 自动派生设备清单，无独立设备注册表 |
+| 在线状态 | 已实现 | 最近一次接收时间超过 60 秒判为离线 |
+| 查询接口 | 已实现 | 设备、最新数据、单指标历史、卧床状态、体动记录，共 5 个 GET 接口 |
+| 异常响应 | 已实现 | 统一 `{code, message, data}`，参数错误 400、不存在 404、服务器错误 500 |
+| 真实在床判断 | 待完善 | 当前 `bed_state` 只是在线状态近似值，尚未接入 FSR 压力判断 |
+| 体动片段 | 待完善 | 当前按运动上报记录返回，尚未将连续记录合并为一次完整动作 |
+| 传感器故障 | 待完善 | 床体故障字段尚未接入；环境 `env_status` 的枚举仍待节点侧确认 |
+| 风扇闭环 | 未提供 | 当前无命令下发、规则引擎、控制记录或风扇接口 |
 
 ## 快速开始
 
+### 1. 环境要求
+
+- Python **3.14+**
+- [uv](https://docs.astral.sh/uv/)
+- 如需连接真实 IoTDA，还需有效的 AMQP 接入凭证
+
+`python-qpid-proton` 固定为 **0.39.0**，以使用 Windows 预编译 wheel，避免本地 MSVC 编译依赖。
+
+### 2. 安装与配置
+
 ```powershell
-# 1. 安装依赖
+# 安装依赖
 uv sync
 
-# 2. 准备配置
+# 创建本地配置
 Copy-Item .env.example .env
-# 编辑 .env，填入 IoTDA 接入凭证
-
-# 3. 启动（任选其一）
-uv run fastapi dev src/backend/main.py    # API + 后台 AMQP 消费者
-uv run python -m backend.amqp             # 只跑消费者
-
-# 4. 打开接口文档
-# http://127.0.0.1:8000/docs
 ```
 
-## 环境变量
+编辑 `.env`，填入 IoTDA 应用侧接入凭证。若只启动查询 API，可暂不填写；缺少 AMQP 必填配置时，服务会告警并跳过订阅。
 
-| 变量 | 必填 | 说明 |
-| --- | --- | --- |
-| `AMQP_HOST` | 是 | IoTDA 实例的 AMQP 接入域名 |
-| `AMQP_PORT` | 否 | 默认 `5671` |
-| `AMQP_ACCESS_KEY` | 是 | IoTDA「接入凭证」的 AccessKey |
-| `AMQP_ACCESS_CODE` | 是 | IoTDA「接入凭证」的 AccessCode |
-| `AMQP_QUEUE` | 否 | 订阅队列名，默认 `DefaultQueue` |
-| `AMQP_INSTANCE_ID` | 否 | 同 Region 多实例的标准版才填 |
-| `SQLITE_PATH` | 否 | 默认项目根目录 `data/iot.db`，一般无需设置 |
+### 3. 启动服务
 
-优先级：**系统环境变量 > `.env`**，临时覆盖配置不会被文件锁死。缺少必填项时只告警并跳过订阅，不影响 API 启动。
-
-## 华为云 IoTDA 配置
-
-1. **获取接入凭证**：IoTDA 控制台 → 应用侧 → 接入凭证，创建后得到 AccessKey / AccessCode。
-   - 注意：这里不是「我的凭证」里的 IAM AK/SK，两者不能混用。用错会报 `amqp:unauthorized-access`。
-2. **获取接入域名**：实例 → 接入信息 → 应用接入 → AMQP 接入域名，端口 `5671`。
-3. **创建 AMQP 订阅**：数据转发规则选择资源类型（如 `device.property`），转发目标指向 AMQP 队列，队列名与 `AMQP_QUEUE` 保持一致。
-4. **设备侧**：设备通过 MQTT 上报属性，属性名需与产品模型中定义的一致。
-
-## 数据模型
-
-### env_readings（EnvService）
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| id | INTEGER | 自增主键 |
-| device_id | TEXT | 设备 ID |
-| temperature | REAL | 温度 |
-| humidity | REAL | 湿度 |
-| light | INTEGER | 光照 |
-| env_status | INTEGER | 环境状态 |
-| event_time | TEXT | 平台事件时间 |
-| received_at | TEXT | 本地接收时间（ISO 8601） |
-
-### bed_readings（BedService）
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| id | INTEGER | 自增主键 |
-| device_id | TEXT | 设备 ID |
-| accel_x / accel_y / accel_z | INTEGER | 三轴加速度原始值 |
-| motion_power_peak | REAL | 近 10 秒运动功率峰值 |
-| motion_state | TEXT | 床垫静止 / 运动状态 |
-| motion_count_10s | INTEGER | 近 10 秒检测到的运动事件次数 |
-| event_time | TEXT | 平台事件时间 |
-| received_at | TEXT | 本地接收时间 |
-
-属性名到列名的映射集中在 `storage.py` 的 `SERVICE_TABLES`，新增服务或属性只需改这一处。
-
-### 查询示例
-
-```sql
--- 最近 20 条温湿度
-SELECT event_time, temperature, humidity
-FROM env_readings
-WHERE device_id = '你的设备ID'
-ORDER BY id DESC
-LIMIT 20;
-
--- 按小时统计温度均值
-SELECT substr(event_time, 1, 13) AS hour, AVG(temperature)
-FROM env_readings
-GROUP BY hour
-ORDER BY hour DESC;
+```powershell
+uv run fastapi dev src/backend/main.py
 ```
 
-## HTTP 接口
+启动后访问：
 
-### GET /
+- Swagger UI：<http://127.0.0.1:8000/docs>
+- OpenAPI JSON：<http://127.0.0.1:8000/openapi.json>
 
-健康检查，返回 `{"Hello": "World"}`。
+仅运行 AMQP 消费者：
 
-### POST /iot/callback
+```powershell
+uv run python -m backend.amqp
+```
 
-接收 HTTP 推送，需携带三个请求头：`nonce`、`timestamp`、`signature`。
+## 配置项
 
-签名算法：将 `token`、`nonce`、`timestamp` 三个值按字典序排序后直接拼接，做 SHA-256 并转小写十六进制，与 `signature` 比对；不匹配返回 403。Token 在 `routers/iot.py` 的 `SUBSCRIBE_TOKEN` 中配置。
+配置优先级：**系统环境变量 > `.env`**。
 
-> 该接口仅用于本地联调或公网可达的场景；华为云 HTTP 推送要求公网 HTTPS 地址，内网服务请使用 AMQP 方式。
+| 环境变量 | 必填 | 默认值 | 用途 |
+|----------|------|--------|------|
+| `AMQP_HOST` | 连接云端时必填 | 无 | IoTDA 实例 AMQP 接入域名 |
+| `AMQP_PORT` | 否 | `5671` | AMQP 端口 |
+| `AMQP_ACCESS_KEY` | 连接云端时必填 | 无 | IoTDA 应用侧接入凭证 AccessKey |
+| `AMQP_ACCESS_CODE` | 连接云端时必填 | 无 | IoTDA 应用侧接入凭证 AccessCode |
+| `AMQP_QUEUE` | 否 | `DefaultQueue` | AMQP 订阅队列名 |
+| `AMQP_INSTANCE_ID` | 多实例时填写 | 空 | 标准版同 Region 多实例 ID |
+| `SQLITE_PATH` | 否 | `data/iot.db` | SQLite 文件路径，支持绝对路径和 `~` |
 
-## 常见问题
+> AccessKey / AccessCode 不是 IAM 的 AK/SK。凭证类型错误通常会导致 `amqp:unauthorized-access`。
 
-**启动日志提示「跳过 AMQP 订阅：缺少环境变量」**
-未配置 `AMQP_HOST / AMQP_ACCESS_KEY / AMQP_ACCESS_CODE`，检查 `.env` 是否存在、变量名是否正确。
+## 设备上报协议
 
-**连接报 `amqp:unauthorized-access`**
-凭证类型用错。必须使用 IoTDA 的「接入凭证」，不是 IAM 的 AK/SK；标准版多实例还需填 `AMQP_INSTANCE_ID`。
+设备 ID 使用 IoTDA 消息中的真实值，不在后端硬编码。同一类设备共用对应宽表，通过 `device_id` 区分。
 
-**收到推送日志，但库里没有数据**
-查看是否有「未知服务，跳过落库」或「属性未映射」告警，确认产品模型中的服务名、属性名与 `SERVICE_TABLES` 一致。
+### EnvService
 
-**数据库文件在哪**
-默认 `项目根/data/iot.db`，由代码中的绝对路径确定，与启动时所在目录无关。想换位置设置绝对路径的 `SQLITE_PATH`。
+| 上报属性 | 入库字段 | 类型/含义 |
+|----------|----------|-----------|
+| `temperature` | `temperature` | 温度，℃ |
+| `humidity` | `humidity` | 相对湿度，%RH |
+| `light` | `light` | 光照，lux |
+| `env_status` | `env_status` | 环境节点状态码，具体枚举待设备侧确认 |
 
-**平台重复推送导致重复数据**
-IoTDA 在非 200 或超时时会重试。当前未做去重，可按 `device_id + event_time` 加唯一索引或写入前判重。
+### BedService
 
-**后端在内网，华为云怎么推送**
-HTTP 推送需要公网 HTTPS 地址；内网环境请使用 AMQP 主动订阅（本项目的默认方案）。
+| 上报属性 | 入库字段 | 类型/含义 |
+|----------|----------|-----------|
+| `accelX` / `accelY` / `accelZ` | `accel_x` / `accel_y` / `accel_z` | 三轴加速度原始值 |
+| `motionState` | `motion_state` | 节点计算的静止/运动状态 |
+| `motionCount10s` | `motion_count_10s` | 近 10 秒体动次数 |
+| `motionPowerPeak` | `motion_power_peak` | 近 10 秒运动功率峰值 |
+
+两条公共时间字段：
+
+- `event_time`：优先使用服务或消息中的事件时间，缺失时使用后端当前时间。
+- `received_at`：后端接收入库时生成，用于在线判定和最后上报时间。
+
+字段映射集中在 `src/backend/storage.py` 的 `SERVICE_TABLES`。新增属性时还需同步数据库列和接口文档，不能只修改设备上报代码。
+
+## 前端查询接口
+
+统一前缀：`/api/v1`。
+
+| 方法 | 路径 | 主要参数 | 用途 |
+|------|------|----------|------|
+| GET | `/devices` | 无 | 设备列表、类型、在线状态和最后上报时间 |
+| GET | `/devices/{device_id}/latest` | 路径设备 ID | 最新环境与床体数据；无另一类数据时对应字段为 `null` |
+| GET | `/devices/{device_id}/history` | `metric` 必填；`start`、`end`、`points` 可选 | 单指标历史曲线，默认最多返回 200 个降采样点 |
+| GET | `/bed/state` | `device_id` 可选 | 最新卧床信息及近似 `bed_state` |
+| GET | `/bed/events` | `device_id`、`start`、`end`、`limit` 可选 | 运动状态上报记录，默认最多 50 条 |
+
+历史指标白名单：
+
+```text
+temperature · humidity · light · env_status
+accel_x · accel_y · accel_z · motion_power_peak · motion_count_10s
+```
+
+示例：
+
+```http
+GET /api/v1/devices/env-01/history?metric=temperature&points=200
+```
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {}
+}
+```
+
+错误响应中的 `code` 等于 HTTP 状态码，`data` 为 `null`。详细字段、空值规则和请求示例见[前端接口文档](document/API_Reference_V0.1.md)。
+
+## 项目结构
+
+```text
+项目根/
+├── document/                         # 需求、接口与联调文档
+│   ├── Requirements_Specification_V0.2.md
+│   ├── API_Reference_V0.1.md
+│   ├── Member_1_2_3_Action_Items_V0.1.md
+│   ├── Known_Issues_V0.1.md
+│   └── Code_Changes_V0.1.md
+├── src/backend/
+│   ├── main.py                       # FastAPI 入口、路由与统一异常处理
+│   ├── amqp.py                       # AMQP 消费、消息解析与自动重连
+│   ├── storage.py                    # SQLite 表结构、入库与查询函数
+│   └── routers/
+│       ├── api.py                    # /api/v1 前端查询接口
+│       └── iot.py                    # /iot/callback 备用签名校验入口
+├── data/iot.db                       # 运行时数据库（不提交 Git）
+├── .env.example                      # 配置模板
+├── pyproject.toml                    # Python 与依赖配置
+└── uv.lock                           # 锁定依赖版本
+```
+
+## 文档导航
+
+| 文档 | 用途 |
+|------|------|
+| [需求规格说明书](document/Requirements_Specification_V0.2.md) | 功能、非功能需求及验收基线；文件名保留 V0.2，文档内部为 v0.3 |
+| [前端接口文档](document/API_Reference_V0.1.md) | 五个查询接口的字段、参数、示例及前端接入注意事项 |
+| [成员 1、2、3 补充事项](document/Member_1_2_3_Action_Items_V0.1.md) | 节点协议、心跳、异常处理和联调任务清单 |
+| [待修正问题清单](document/Known_Issues_V0.1.md) | 已知问题、影响、负责人和修复状态 |
+| [代码变更记录](document/Code_Changes_V0.1.md) | 风扇相关脚手架移除范围及当前实现边界 |
+
+> 需求文档中风扇、规则表和控制记录的部分描述尚未同步回退；这些功能以代码变更记录和当前源码为准。
+
+## 联调排查
+
+| 现象 | 优先检查 |
+|------|----------|
+| 启动时提示跳过 AMQP 订阅 | `.env` 是否存在，`AMQP_HOST / ACCESS_KEY / ACCESS_CODE` 是否完整 |
+| 报 `amqp:unauthorized-access` | 是否误用 IAM AK/SK；多实例是否缺少 `AMQP_INSTANCE_ID` |
+| 设备列表为空 | 设备清单来自成功入库的读数，确认已收到并保存真实上报 |
+| 有消费日志但数据库无记录 | 检查 service 和属性名是否匹配 `SERVICE_TABLES`，查看“未知服务/未映射属性”告警 |
+| 静置床体被显示为离线 | 床体是否每 30 秒以内发送周期快照；仅状态变化上报与 60 秒在线判定不兼容 |
+| 时间范围查询漏数据 | 确认真实 `event_time` 是带时区的 ISO 8601，而不是未转换的 Unix 时间戳 |
+| 前端浏览器跨域失败 | 当前未配置 CORS，开发环境优先使用前端开发服务器代理 |
 
 ## 安全说明
 
-- `.env` 已在 `.gitignore` 中，真实凭证不会提交；仓库只保留 `.env.example`。
-- AMQP 当前使用 `ANONYMOUS_PEER`（不校验服务端证书），与官方示例一致；生产环境建议改为 `VERIFY_PEER` 并配置 CA。
-- 接入凭证一旦泄露应立即在控制台删除并重新生成。
+- `.env`、数据库和虚拟环境已加入 `.gitignore`，真实凭证不得提交仓库。
+- `/api/v1/*` 当前没有鉴权，也未配置 CORS，仅限可信局域网内联调。
+- 回调 Token 当前仍在源码中配置，备用接口生产化前需改为环境变量并完善 payload。
+- AMQP 当前使用 `ANONYMOUS_PEER`，与官方示例一致；生产部署应改为证书校验并配置 CA。
+- 凭证泄露后应立即在 IoTDA 控制台删除并重新生成。
 
-## 待办
+## 下一步
 
-- 推送幂等（按 `device_id + event_time` 去重）。
-- 查询接口：按设备、时间范围、指标返回历史数据。
-- 阈值告警与通知。
+1. 获取两台设备的真实 ID、上报样例、状态枚举和时间格式。
+2. 为床体增加周期心跳，完成静置、体动、断网和传感器异常联调。
+3. 接入 FSR 与真实在床判断，补充传感器故障状态。
+4. 增加推送幂等去重，并确定连续体动记录的片段合并规则。
+5. 由全组确认是否重新实施完整风扇闭环，再同步需求、硬件和后端开发。
