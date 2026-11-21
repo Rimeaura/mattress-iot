@@ -1,5 +1,5 @@
-"""前端查询接口 /api/v1/*（FR-11）。
-
+"""
+前端查询接口 /api/v1/*（FR-11）。
 统一响应体：``{"code": 0, "message": "ok", "data": ...}``；
 出错时 ``code`` 取 HTTP 状态码（400/404/500），``data`` 为 null。
 """
@@ -119,7 +119,7 @@ def latest_data(device_id: str):
         }
     )
 
-
+# 支持历史曲线查询（降采样）
 @router.get("/devices/{device_id}/history")
 def history(
     device_id: str,

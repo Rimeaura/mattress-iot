@@ -9,17 +9,16 @@ BedService -> bed_readings  (accel_x / accel_y / accel_z / motion_power_peak / m
 import logging
 import os
 import sqlite3
-from sqlite3 import Connection
 import threading
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger("iot.storage")
-
+#path（__file__ 是当前模块的文件路径, resolve() 解析为绝对路径, parents[2] 是上一级目录）
 _DEFAULT_DB = Path(__file__).resolve().parents[2] / "data" / "iot.db"
 
-
+#expanduser() 是展开 ~ 为用户目录，起到兼容不同平台的路径格式的作用
 def _db_path() -> Path:
     """每次取路径，保证 .env / 环境变量在导入之后再加载也能生效。"""
     return Path(os.getenv("SQLITE_PATH", str(_DEFAULT_DB))).expanduser()
@@ -55,7 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_bed_device_time
     ON bed_readings (device_id, received_at);
 """
 
-# 指标名 -> (表名, 列名, 单位)；查询接口的 metric 白名单
+# 指标名 -> (表名, 列名, 单位)；查询接口的 metric 白名单，为了
 METRICS = {
     "temperature": ("env_readings", "temperature", "℃"),
     "humidity": ("env_readings", "humidity", "%RH"),
