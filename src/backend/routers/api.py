@@ -1,4 +1,4 @@
-"""前端查询接口 /api/v1/*（FR-11）与规则配置读写（FR-10）。
+"""前端查询接口 /api/v1/*（FR-11）。
 
 统一响应体：``{"code": 0, "message": "ok", "data": ...}``；
 出错时 ``code`` 取 HTTP 状态码（400/404/500），``data`` 为 null。
@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
 
 from backend import storage
 
@@ -189,64 +188,3 @@ def bed_events(
     _validate_time_range(start, end)
     total, items = storage.query_bed_events(device_id, start, end, limit)
     return _ok({"total": total, "items": items})
-
-
-@router.get("/control-records")
-def control_records(
-    device_id: Optional[str] = Query(None, description="设备 ID，缺省查全部设备"),
-    start: Optional[str] = Query(None, description="起始时间 ISO 8601"),
-    end: Optional[str] = Query(None, description="结束时间 ISO 8601"),
-    limit: int = Query(50, ge=1, le=500),
-    offset: int = Query(0, ge=0),
-):
-    """控制记录（含触发原因）。"""
-    _validate_time_range(start, end)
-    total, items = storage.query_control_records(
-        device_id, start, end, limit, offset
-    )
-    return _ok({"total": total, "limit": limit, "offset": offset, "items": items})
-
-
-@router.get("/rules")
-def list_rules():
-    """规则配置列表。"""
-    return _ok(storage.query_rules())
-
-
-class RuleUpdate(BaseModel):
-    threshold_on: Optional[float] = None
-    threshold_off: Optional[float] = None
-    enabled: Optional[bool] = None
-
-
-@router.put("/rules/{rule_id}")
-def modify_rule(rule_id: str, body: RuleUpdate):
-    """修改规则阈值或启停；开阈值必须大于关阈值（回差）。"""
-    rule = storage.get_rule(rule_id)
-    if rule is None:
-        raise HTTPException(status_code=404, detail=f"规则 {rule_id} 不存在")
-    if (
-        body.threshold_on is None
-        and body.threshold_off is None
-        and body.enabled is None
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="至少提供一个可修改字段: threshold_on / threshold_off / enabled",
-        )
-
-    threshold_on = (
-        body.threshold_on if body.threshold_on is not None else rule["threshold_on"]
-    )
-    threshold_off = (
-        body.threshold_off if body.threshold_off is not None else rule["threshold_off"]
-    )
-    if threshold_on <= threshold_off:
-        raise HTTPException(
-            status_code=400, detail="threshold_on 必须大于 threshold_off（回差区间）"
-        )
-
-    updated = storage.update_rule(
-        rule_id, body.threshold_on, body.threshold_off, body.enabled
-    )
-    return _ok(updated)

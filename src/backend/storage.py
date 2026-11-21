@@ -53,35 +53,7 @@ CREATE TABLE IF NOT EXISTS bed_readings (
 );
 CREATE INDEX IF NOT EXISTS idx_bed_device_time
     ON bed_readings (device_id, received_at);
-
-CREATE TABLE IF NOT EXISTS control_record (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_id  TEXT    NOT NULL,
-    action     TEXT    NOT NULL,
-    value      TEXT,
-    source     TEXT    NOT NULL,
-    rule_id    TEXT,
-    reason     TEXT    NOT NULL,
-    created_at TEXT    NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_control_device_time
-    ON control_record (device_id, created_at);
-
-CREATE TABLE IF NOT EXISTS rule_config (
-    rule_id       TEXT PRIMARY KEY,
-    metric        TEXT    NOT NULL,
-    threshold_on  REAL    NOT NULL,
-    threshold_off REAL    NOT NULL,
-    action        TEXT    NOT NULL,
-    enabled       INTEGER NOT NULL DEFAULT 1,
-    updated_at    TEXT    NOT NULL
-);
 """
-
-# 规则示例：温度 ≥ 30℃ 开风扇，≤ 28℃ 关（FR-10 rule-1）
-DEFAULT_RULES = [
-    ("rule-1", "temperature", 30.0, 28.0, "fan_control", 1),
-]
 
 # 指标名 -> (表名, 列名, 单位)；查询接口的 metric 白名单
 METRICS = {
@@ -155,12 +127,6 @@ def init_db() -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(_connect()) as conn, conn:
             conn.executescript(SCHEMA)
-            conn.executemany(
-                "INSERT OR IGNORE INTO rule_config "
-                "(rule_id, metric, threshold_on, threshold_off, action, enabled, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [(*rule, _now()) for rule in DEFAULT_RULES],
-            )
         _initialized = True
         logger.info("SQLite 就绪: %s", db_path)
 
@@ -359,109 +325,3 @@ def query_bed_events(
         )
         items = _rows_to_dicts(cursor, cursor.fetchall())
     return total, items
-
-
-def query_control_records(
-    device_id: str | None = None,
-    start: str | None = None,
-    end: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
-) -> tuple[int, list[dict]]:
-    """控制记录分页查询，返回 (总数, 当前页)。"""
-    init_db()
-    where = "1 = 1"
-    params: list = []
-    if device_id:
-        where += " AND device_id = ?"
-        params.append(device_id)
-    if start:
-        where += " AND datetime(created_at) >= datetime(?)"
-        params.append(start)
-    if end:
-        where += " AND datetime(created_at) <= datetime(?)"
-        params.append(end)
-
-    with closing(_connect()) as conn:
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM control_record WHERE {where}", params
-        ).fetchone()[0]
-        cursor = conn.execute(
-            "SELECT id, device_id, action, value, source, rule_id, reason, created_at "
-            f"FROM control_record WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?",
-            [*params, limit, offset],
-        )
-        items = _rows_to_dicts(cursor, cursor.fetchall())
-    return total, items
-
-
-_RULE_COLUMNS = (
-    "rule_id, metric, threshold_on, threshold_off, action, enabled, updated_at"
-)
-_RULE_FIELDS = (
-    "rule_id",
-    "metric",
-    "threshold_on",
-    "threshold_off",
-    "action",
-    "enabled",
-    "updated_at",
-)
-
-
-def _rule_to_dict(row) -> dict:
-    rule = dict(zip(_RULE_FIELDS, row))
-    rule["enabled"] = bool(rule["enabled"])
-    return rule
-
-
-def query_rules() -> list[dict]:
-    init_db()
-    with closing(_connect()) as conn:
-        rows = conn.execute(
-            f"SELECT {_RULE_COLUMNS} FROM rule_config ORDER BY rule_id"
-        ).fetchall()
-    return [_rule_to_dict(row) for row in rows]
-
-
-def get_rule(rule_id: str) -> dict | None:
-    init_db()
-    with closing(_connect()) as conn:
-        row = conn.execute(
-            f"SELECT {_RULE_COLUMNS} FROM rule_config WHERE rule_id = ?", (rule_id,)
-        ).fetchone()
-    return _rule_to_dict(row) if row else None
-
-
-def update_rule(
-    rule_id: str,
-    threshold_on: float | None = None,
-    threshold_off: float | None = None,
-    enabled: bool | None = None,
-) -> dict | None:
-    """部分更新规则阈值/开关，规则不存在返回 None。"""
-    init_db()
-    assignments = []
-    params: list = []
-    if threshold_on is not None:
-        assignments.append("threshold_on = ?")
-        params.append(float(threshold_on))
-    if threshold_off is not None:
-        assignments.append("threshold_off = ?")
-        params.append(float(threshold_off))
-    if enabled is not None:
-        assignments.append("enabled = ?")
-        params.append(1 if enabled else 0)
-    if not assignments:
-        return get_rule(rule_id)
-
-    assignments.append("updated_at = ?")
-    params.append(_now())
-    params.append(rule_id)
-    with closing(_connect()) as conn, conn:
-        cursor = conn.execute(
-            f"UPDATE rule_config SET {', '.join(assignments)} WHERE rule_id = ?", params
-        )
-        if cursor.rowcount == 0:
-            return None
-    return get_rule(rule_id)

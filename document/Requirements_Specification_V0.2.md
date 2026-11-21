@@ -3,12 +3,12 @@
 
 | 项目 | 内容 |
 |------|------|
-| 文档版本 | v0.2（草案，按后端代码现状校正） |
-| 编写日期 | 2026-11-10（v0.2 修订 2026-11-21） |
+| 文档版本 | v0.3（草案，按后端代码现状校正） |
+| 编写日期 | 2026-11-10（v0.3 修订 2026-11-21） |
 | 编写人 | 成员4（后端） |
 | 评审人 | 全体成员 |
 | 状态 | 第一阶段评审用 |
-| 修订说明 | v0.2 依据现有后端代码（FastAPI + SQLite + AMQP）校正 service 名称、表结构、字段名、时间戳格式与接口描述；未实现项统一标注"待实现"，不再按已交付描述 |
+| 修订说明 | v0.2 依据后端代码（FastAPI + SQLite + AMQP）校正 service 名称、表结构、字段名、时间戳格式与接口描述；v0.3 同步 FR-11 查询接口、`control_record`/`rule_config` 建表等已完成项，未实现项继续标注"待实现" |
 
 ---
 
@@ -100,7 +100,7 @@
 环境节点 env-01 ─┘                           ├─ HTTP推送(备，签名)→ 后端服务
                                              │
                                              └← 命令下发(fan_control，待实现) ←┘
-前端网页 ──── HTTP /api/v1/*（查询接口待实现）────→ 后端服务
+前端网页 ──── HTTP /api/v1/*（查询接口已实现）────→ 后端服务
 ```
 
 ### 3.2 模块与分工映射
@@ -110,7 +110,7 @@
 | 床体感知与状态判断 | 成员1 | 输出 `accelX/Y/Z / motionState / motionCount10s / motionPowerPeak`；派生 `bed_state / sensor_status` |
 | 环境监测与风扇控制 | 成员2 | 输出 `temperature / humidity / light / env_status`（`co2` 不进第一版）；接收 `fan_control` 命令 |
 | 设备通信 | 成员3 | 节点侧 MQTT/TLS（8883）接入 IoTDA，断线重连 |
-| 后端、数据库与规则服务 | 成员4 | AMQP 订阅入库、HTTP 回调、命令下发（待实现）、查询接口（待实现）、阈值规则（待实现） |
+| 后端、数据库与规则服务 | 成员4 | AMQP 订阅入库、HTTP 回调、查询接口（已实现）、规则配置读写（已实现）、命令下发（待实现）、阈值规则引擎（待实现） |
 | 前端与整机测试 | 成员5 | 调用后端查询接口，维护测试清单 |
 
 ---
@@ -141,7 +141,7 @@
 **FR-01 在床/离床判断**
 - 输入：MPU6050 三轴加速度（上报属性 `accelX` / `accelY` / `accelZ`）+ FSR 压力（采购到货后接入）
 - 处理：节点侧计算 `motionState`（床垫静止/运动）、`motionCount10s`、`motionPowerPeak`；阈值判断 + 防抖（默认 10 s，可配置）；状态切换才上报变化
-- 输出：上述体动属性写入 `bed_readings`；`bed_state ∈ {in_bed, out_of_bed}` 由 `motionState` + FSR 压力派生，后端按上报序列记录变化时间（变化点单独记录待实现）
+- 输出：上述体动属性写入 `bed_readings`；`bed_state ∈ {in_bed, out_of_bed}` 由 `motionState` + FSR 压力派生，后端按上报序列记录变化时间（变化点单独记录待实现）。FSR 未接入前，查询接口以"最近一条卧床数据是否仍在 60 s 在线窗口内"近似判定，见 FR-11
 - 验收：上床→网页显示"在床"；离开→防抖时间后显示"离床"；连续演示数据留存
 
 **FR-02 体动记录**
@@ -165,22 +165,27 @@
 - 校验（已实现）：按属性名映射取值，数值字符串、浮点数转整数自动转换；转换失败写 NULL 并告警；未知 service 或未映射属性跳过并告警，不中断消费
 - 校验（待实现）：device_id 已注册、时间戳在合理范围、非法数据返回错误码且整条拒写；重复推送按 `device_id + event_time` 幂等去重
 - 存储（已实现）：`env_readings`、`bed_readings` 两张宽表，每次上报写一行，含 `event_time`（平台事件时间）与 `received_at`（本地接收时间）
-- 存储（待实现）：`device` 设备信息、`control_record` 控制记录（含触发原因）、`rule_config` 规则配置、卧床状态变化点
-- 验收：构造缺字段/错类型数据测试通过（当前预期：缺字段写 NULL、错类型转 NULL 并告警）；四类数据均可经接口取回（查询接口待实现）
+- 存储（已实现，v0.3）：`control_record`（控制记录，含 `reason` 触发原因）与 `rule_config`（阈值配置）已建表，并预置 rule-1（温度 ≥30℃ 开、≤28℃ 关）；`control_record` 的写入方是规则服务，规则服务未实现前该表为空
+- 存储（待实现）：`device` 设备信息表（当前设备列表与在线状态由读数表派生）、卧床状态变化点记录
+- 验收：构造缺字段/错类型数据测试通过（当前预期：缺字段写 NULL、错类型转 NULL 并告警）；四类数据已可经 `/api/v1` 查询接口取回（控制记录在规则服务上线前为空）
 
 **FR-10 规则服务**
 - 规则形式：`metric ≥ threshold_on → 开；metric ≤ threshold_off → 关`（回差防频繁启停）
-- 示例：rule-1 温度 ≥ 30℃ 开风扇，≤ 28℃ 关
-- 每次触发写控制记录，reason 必须含规则号与当时数值；阈值可经接口修改
-- 验收：温度越限→风扇动作且记录含触发原因
+- 示例：rule-1 温度 ≥ 30℃ 开风扇，≤ 28℃ 关（已作为默认配置写入 `rule_config`）
+- 已实现（v0.3）：规则配置查询与修改接口 `GET /api/v1/rules`、`PUT /api/v1/rules/{rule_id}`；修改时校验 `threshold_on > threshold_off`
+- 待实现：规则引擎（按上报数据自动判定并下发 `fan_control`）、每次触发写控制记录（reason 含规则号与当时数值）
+- 验收：温度越限→风扇动作且记录含触发原因（依赖规则引擎与命令下发，尚未满足）
 
-**FR-11 查询接口**
-- 设备列表与在线状态、最新数据、历史曲线（降采样）、卧床状态/事件、控制记录、规则配置读写
-- 详见配套接口草案第 3 章
-- 验收：前端按接口文档逐项调用成功
+**FR-11 查询接口（v0.3 已实现）**
+- 覆盖：设备列表与在线状态、最新数据、历史曲线（降采样）、卧床状态/事件、控制记录、规则配置读写
+- 统一响应 `{code, message, data}`：成功 `code=0`；错误 `code` 取 HTTP 状态码（400 参数错误 / 404 不存在 / 500 内部错误），错误时 `data` 为 `null`
+- 接口清单见 7.1，实现位于 `src/backend/routers/api.py`
+- 鉴权：文档未定义 `/api/v1/*` 的权限规则，当前接口无权限校验，仅限局域网内网访问；如需鉴权须先补需求
+- 验收（v0.3 自测）：已用独立临时 SQLite 库完成 8 个正常场景与 11 个异常场景验证；前端接入后仍需在真机数据上复测
 
 **FR-13 异常展示**
 - 传感器异常（sensor_status=fault）、设备离线（超时未上报）、网络中断，网页必须显式标识
+- 当前进度：设备离线已由接口按 60 s 在线窗口判定；后端尚无 `sensor_status` 字段，传感器故障标识待节点上报后接入
 - 验收：拔传感器/断网→网页显示异常/离线，不显示看似正常的旧数据
 
 ## 5. 非功能需求
@@ -198,13 +203,16 @@
 ## 6. 数据需求
 
 - 数据库：SQLite（WAL 模式），文件默认 `data/iot.db`，可用 `SQLITE_PATH` 覆盖
-- 已实现 2 张宽表：
+- 已实现 4 张表（v0.3）：
   - `env_readings`：`temperature`、`humidity`、`light`、`env_status`
   - `bed_readings`：`accel_x` / `accel_y` / `accel_z`、`motion_state`、`motion_count_10s`、`motion_power_peak`
-- 待建 3 张表：`device`（设备信息/在线状态）、`control_record`（含触发原因）、`rule_config`（阈值配置）
+  - `control_record`：`device_id`、`action`、`value`、`source`（rule/manual）、`rule_id`、`reason`、`created_at`；当前无写入方
+  - `rule_config`：`rule_id`、`metric`、`threshold_on`、`threshold_off`、`action`、`enabled`、`updated_at`；启动时预置 rule-1
+- 待建 1 张表：`device`（设备信息/在线状态）；当前设备清单与在线状态由 `env_readings`、`bed_readings` 的 `device_id` + `received_at` 派生，在线阈值固定 60 s（NFR-02）
+- 待补记录：卧床状态变化点（FR-01）
 - 时间戳：`event_time`（平台事件时间）与 `received_at`（本地接收时间）均为 ISO 8601 带时区文本，**不是 Unix 秒**
 - 单位在字段定义中固定（℃、%RH、lux、ppm）；当前表结构**没有 CO₂ 列**，纳入第一版需新增列（改表），不能靠预留 NULL 免改表
-- 表结构以 `src/backend/storage.py` 的 `SCHEMA` 与 `SERVICE_TABLES` 为准；配套草案补齐后同步
+- 表结构以 `src/backend/storage.py` 的 `SCHEMA` 与 `SERVICE_TABLES` 为准
 
 ## 7. 接口需求
 
@@ -212,14 +220,37 @@
 - IoTDA → 后端：
   - 主通道：AMQP 订阅（`amqps://<host>:5671`，AccessKey/AccessCode 鉴权，断线 1–15 s 指数退避重连）
   - 备通道：HTTP 推送 `POST /iot/callback`（`nonce`/`timestamp`/`signature` 签名校验，当前仅打日志、不落库，需公网 HTTPS）
-- 后端 → 前端：HTTP `/api/v1/*`（查询接口待实现）；统一响应 `{code, message, data}`。现有接口为 `POST /iot/callback`（返回 `{code, message}`）和 `GET /`（健康检查）
-- 详细接口与错误码见配套草案第 3 章（草案待补，暂以后端代码为准）
+- 后端 → 前端（v0.3 已实现）：HTTP `/api/v1/*`，统一响应 `{code, message, data}`；接口清单见 7.1，实现位于 `src/backend/routers/api.py`
+- 其他现有接口：`POST /iot/callback`（返回 `{code, message}`）、`GET /`（健康检查）
+- 配套接口草案仍未提供；v0.3 的路径、字段与错误码以 7.1 与后端代码为准
+
+### 7.1 前端查询与规则接口（已实现）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/devices` | 设备列表、`device_type`（env/bed/combined）与在线状态（超 60 s 无上报判离线） |
+| GET | `/api/v1/devices/{device_id}/latest` | 最新环境数据与卧床数据；设备无数据返回 404 |
+| GET | `/api/v1/devices/{device_id}/history` | 历史曲线；参数 `metric`（必填）、`start`、`end`、`points`（2–1000，默认 200，分桶均值降采样） |
+| GET | `/api/v1/bed/state` | 卧床状态；参数 `device_id` 可选，缺省取最近上报；FSR 未接入时以在线窗口近似 |
+| GET | `/api/v1/bed/events` | 体动事件；参数 `device_id`、`start`、`end`、`limit`（1–500，默认 50） |
+| GET | `/api/v1/control-records` | 控制记录；参数 `device_id`、`start`、`end`、`limit`、`offset`，返回 `total` 与 `items` |
+| GET | `/api/v1/rules` | 规则配置列表 |
+| PUT | `/api/v1/rules/{rule_id}` | 修改 `threshold_on` / `threshold_off` / `enabled`；规则不存在 404，`threshold_on ≤ threshold_off` 返回 400 |
+
+- `metric` 白名单：`temperature`、`humidity`、`light`、`env_status`、`accel_x`、`accel_y`、`accel_z`、`motion_power_peak`、`motion_count_10s`；非法值返回 400
+- 错误码：400 参数错误、404 资源不存在、500 服务器内部错误；错误响应 `data` 为 `null`
+- 鉴权：未定义，接口无权限校验，仅限局域网内网访问
+
+### 7.2 未实现接口
+
+- `fan_control` 命令下发与手动控制接口：依赖 IoTDA 命令下发链路与设备侧实现，均未完成，暂不提供
+- HTTP 回调落库：`POST /iot/callback` 目前只校验签名并打日志
 
 ## 8. 验收标准
 
 第一阶段评审逐项打勾（对应任务书 5.3）；最终验收以 2.3 节六个演示场景全部连续通过为准，外加：
 
-1. FR-01～FR-13 全部必做项有测试记录（成员5 维护清单，含步骤/预期/实际/截图）
+1. FR-01～FR-13 全部必做项有测试记录（成员5 维护清单，含步骤/预期/实际/截图）；FR-11 后端自测已完成，待前端接入后复测
 2. 每个核心功能至少一个具体测试动作和预期结果
 3. 异常场景（拔传感器、断网、拔风扇电源）演示通过
 4. 需求未做项（2.2 节）未被暗中实现或夸大宣传
@@ -241,7 +272,7 @@
 3. 成员2：风扇复用 env-01 主板还是独立节点；`fan_control` 命令字段
 4. 成员5：首页轮询频率（建议 3–5 s）；历史曲线默认时间窗
 5. 全组：CO₂ 是否纳入第一版（当前表无该列，纳入需改表；建议列为增强项）；演示现场网络条件确认
-6. 成员4：`/api/v1/*` 查询接口、`device`/`control_record`/`rule_config` 表、`fan_control` 命令下发按代码现状补齐，并确认 HTTP 回调是否接入落库
+6. 成员4：`/api/v1/*` 查询接口与 `control_record`/`rule_config` 表已完成（v0.3）；剩余 `device` 表、卧床状态变化点、`fan_control` 命令下发与规则引擎待实现，并确认 HTTP 回调是否接入落库
 
 ---
 
