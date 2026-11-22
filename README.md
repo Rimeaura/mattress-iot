@@ -23,28 +23,20 @@
 
 ## 系统架构
 
-```text
-┌────────────────┐        ┌────────────────┐
-│ 环境节点        │        │ 床体节点        │
-│ EnvService     │        │ BedService     │
-└───────┬────────┘        └───────┬────────┘
-        └──────────┬───────────────┘
-                   │ MQTT / TLS :8883
-                   ▼
-          ┌─────────────────┐
-          │ 华为云 IoTDA     │
-          └────────┬────────┘
-                   │ AMQP / TLS :5671（后端主动订阅）
-                   ▼
-          ┌─────────────────┐       ┌──────────────────┐
-          │ FastAPI 后端     │──────▶│ SQLite / WAL     │
-          │ 消费、解析、查询  │       │ data/iot.db      │
-          └────────┬────────┘       └──────────────────┘
-                   │ HTTP /api/v1/*
-                   ▼
-          ┌─────────────────┐
-          │ 网页端           │
-          └─────────────────┘
+```mermaid
+flowchart TD
+    Env["环境节点<br/>EnvService"]
+    Bed["床体节点<br/>BedService"]
+    IoTDA["华为云 IoTDA"]
+    Backend["FastAPI 后端<br/>消费、解析、查询"]
+    DB[("SQLite / WAL<br/>data/iot.db")]
+    Web["网页端"]
+
+    Env -->|"MQTT / TLS :8883"| IoTDA
+    Bed -->|"MQTT / TLS :8883"| IoTDA
+    IoTDA -->|"AMQP / TLS :5671<br/>后端主动订阅"| Backend
+    Backend --> DB
+    Backend -->|"HTTP /api/v1/*"| Web
 ```
 
 另有备用入口 `POST /iot/callback`，当前仅校验签名并打印日志，**不会写入数据库**。
