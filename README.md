@@ -12,10 +12,11 @@
 
 ## 项目简介
 
-系统由环境节点、床体节点、华为云 IoTDA 和后端服务组成：
+系统由环境节点、压力板、加速度板、华为云 IoTDA 和后端服务组成：
 
-- **环境节点**：采集温度、湿度、光照和环境状态。
-- **床体节点**：采集三轴加速度、运动状态、近 10 秒体动次数和运动功率峰值。
+- **环境节点（EnvService）**：采集温度、湿度、光照和环境状态。
+- **压力板（bed-pressure）**：采集床位状态、负载判定、置信度、两路压力与状态事件。
+- **加速度板（bed-accel）**：采集三轴加速度、运动状态、近 10 秒体动次数和运动峰值。
 - **后端服务**：通过 AMQP 主动消费 IoTDA 属性上报，写入 SQLite，并向网页提供查询接口。
 - **网页端**：展示设备在线状态、最新数据、历史曲线、卧床状态和体动记录。
 
@@ -26,14 +27,16 @@
 ```mermaid
 flowchart TD
     Env["环境节点<br/>EnvService"]
-    Bed["床体节点<br/>BedService"]
+    Pressure["压力板<br/>bed-pressure"]
+    Accel["加速度板<br/>bed-accel"]
     IoTDA["华为云 IoTDA"]
     Backend["FastAPI 后端<br/>消费、解析、查询"]
     DB[("SQLite / WAL<br/>data/iot.db")]
     Web["网页端"]
 
-    Env -->|"MQTT / TLS :8883"| IoTDA
-    Bed -->|"MQTT / TLS :8883"| IoTDA
+    Env -->|"MQTT 属性上报"| IoTDA
+    Pressure -->|"MQTT 属性上报"| IoTDA
+    Accel -->|"MQTT 属性上报"| IoTDA
     IoTDA -->|"AMQP / TLS :5671<br/>后端主动订阅"| Backend
     Backend --> DB
     Backend -->|"HTTP /api/v1/*"| Web
@@ -51,9 +54,9 @@ flowchart TD
 | 在线状态 | 已实现 | 最近一次接收时间超过 60 秒判为离线 |
 | 查询接口 | 已实现 | 设备、最新数据、单指标历史、卧床状态、体动记录，共 5 个 GET 接口 |
 | 异常响应 | 已实现 | 统一 `{code, message, data}`，参数错误 400、不存在 404、服务器错误 500 |
-| 真实在床判断 | 待完善 | 当前 `bed_state` 只是在线状态近似值，尚未接入 FSR 压力判断 |
-| 体动片段 | 待完善 | 当前按运动上报记录返回，尚未将连续记录合并为一次完整动作 |
-| 传感器故障 | 待完善 | 床体故障字段尚未接入；环境 `env_status` 的枚举仍待节点侧确认 |
+| 真实在床判断 | 已实现（初版） | `bed_state` 直接取压力板上报的 `bedState`，不再用在线状态近似 |
+| 体动片段 | 待完善 | 当前按 `motionState = MOVING` 的记录返回，尚未合并为一次完整动作 |
+| 传感器故障 | 已接入字段 | `sensorStatus` 已入库；压力板可能为 `ADC_FAULT`，加速度板当前恒为 `OK` |
 | 风扇闭环 | 未提供 | 当前无命令下发、规则引擎、控制记录或风扇接口 |
 
 ## 快速开始
@@ -124,18 +127,43 @@ uv run python -m backend.amqp
 | `light` | `light` | 光照，lux |
 | `env_status` | `env_status` | 环境节点状态码，具体枚举待设备侧确认 |
 
-### BedService
+### BedMonitor（压力板 + 加速度板）
+
+两台设备共用服务标识 `BedMonitor`，通过 `device_id` 区分；属性在平台侧只建一份，设备只上报自己那部分，缺失字段写 `NULL`，不视为异常。
+
+**压力板 `bed-pressure`（14 项）**
 
 | 上报属性 | 入库字段 | 类型/含义 |
 |----------|----------|-----------|
-| `accelX` / `accelY` / `accelZ` | `accel_x` / `accel_y` / `accel_z` | 三轴加速度原始值 |
-| `motionState` | `motion_state` | 节点计算的静止/运动状态 |
-| `motionCount10s` | `motion_count_10s` | 近 10 秒体动次数 |
-| `motionPowerPeak` | `motion_power_peak` | 近 10 秒运动功率峰值 |
+| `bedState` | `bed_state` | 床位主状态：`OUT_BED` / `IN_BED_UNKNOWN` / `LYING` / `SITTING` / `UNKNOWN` |
+| `loadPresence` | `load_presence` | 负载判定：`PRESENT` / `UNCERTAIN` / `ABSENT` |
+| `confidence` | `confidence` | 置信度：`HIGH` / `MEDIUM` / `LOW` |
+| `lastEvent` | `last_event` | 最近事件：`BED_IN` / `BED_OUT` / `SIT_UP` / `LIE_DOWN` / `NONE` |
+| `alertType` | `alert_type` | 提示类型：`LONG_STILL` / `LONG_SITTING` / `OUT_BED_TIMEOUT` / `SENSOR_FAULT` / `NONE` |
+| `sensorStatus` | `sensor_status` | 自检状态：`OK` / `ADC_FAULT` |
+| `headShoulderRaw` | `head_shoulder_raw` | 头肩路 ADC 原始码，未减基线 |
+| `headShoulderNet` | `head_shoulder_net` | 头肩路净压，负数截零 |
+| `waistHipRaw` | `waist_hip_raw` | 腰臀路 ADC 原始码，单路阶段恒为 0 |
+| `waistHipNet` | `waist_hip_net` | 腰臀路净压，单路阶段恒为 0 |
+| `totalNetPressure` | `total_net_pressure` | 两路净压之和 |
+| `waistHipRatio` | `waist_hip_ratio` | 腰臀净压占总净压的比例，0–1 |
+| `lastEventSec` | `last_event_sec` | 最近事件发生在开机后第几秒 |
+| `runSec` | `run_sec` | 开机至今秒数，用于判活 |
+
+**加速度板 `bed-accel`（8 项）**
+
+| 上报属性 | 入库字段 | 类型/含义 |
+|----------|----------|-----------|
+| `accelX` / `accelY` / `accelZ` | `accel_x` / `accel_y` / `accel_z` | 三轴加速度原始值，2048 码约 1g |
+| `motionPeakMg` | `motion_peak_mg` | 近 10 秒三轴合成运动峰值，单位 0.001g |
+| `motionState` | `motion_state` | 运动状态：`STILL` / `MOVING` |
+| `motionCount10s` | `motion_count_10s` | 近 10 秒进入体动的次数，上限 500 |
+| `sensorStatus` | `sensor_status` | 当前恒为 `OK` |
+| `runSec` | `run_sec` | 开机至今秒数，用于判活 |
 
 两条公共时间字段：
 
-- `event_time`：优先使用服务或消息中的事件时间，缺失时使用后端当前时间。
+- `event_time`：优先使用服务或消息中的平台事件时间；IoTDA 的 `yyyyMMddTHHmmssZ` 会统一转成带时区的 ISO 8601，缺失时使用后端当前时间。
 - `received_at`：后端接收入库时生成，用于在线判定和最后上报时间。
 
 字段映射集中在 `src/backend/storage.py` 的 `SERVICE_TABLES`。新增属性时还需同步数据库列和接口文档，不能只修改设备上报代码。
@@ -149,14 +177,16 @@ uv run python -m backend.amqp
 | GET | `/devices` | 无 | 设备列表、类型、在线状态和最后上报时间 |
 | GET | `/devices/{device_id}/latest` | 路径设备 ID | 最新环境与床体数据；无另一类数据时对应字段为 `null` |
 | GET | `/devices/{device_id}/history` | `metric` 必填；`start`、`end`、`points` 可选 | 单指标历史曲线，默认最多返回 200 个降采样点 |
-| GET | `/bed/state` | `device_id` 可选 | 最新卧床信息及近似 `bed_state` |
+| GET | `/bed/state` | `device_id` 可选 | `bedState` 原值 + 压力板/加速度板最新帧，缺失侧为 `null` |
 | GET | `/bed/events` | `device_id`、`start`、`end`、`limit` 可选 | 运动状态上报记录，默认最多 50 条 |
 
 历史指标白名单：
 
 ```text
 temperature · humidity · light · env_status
-accel_x · accel_y · accel_z · motion_power_peak · motion_count_10s
+accel_x · accel_y · accel_z · motion_peak_mg · motion_count_10s
+head_shoulder_raw · head_shoulder_net · waist_hip_raw · waist_hip_net
+total_net_pressure · waist_hip_ratio · run_sec · last_event_sec
 ```
 
 示例：
@@ -220,7 +250,8 @@ GET /api/v1/devices/env-01/history?metric=temperature&points=200
 | 报 `amqp:unauthorized-access` | 是否误用 IAM AK/SK；多实例是否缺少 `AMQP_INSTANCE_ID` |
 | 设备列表为空 | 设备清单来自成功入库的读数，确认已收到并保存真实上报 |
 | 有消费日志但数据库无记录 | 检查 service 和属性名是否匹配 `SERVICE_TABLES`，查看“未知服务/未映射属性”告警 |
-| 静置床体被显示为离线 | 床体是否每 30 秒以内发送周期快照；仅状态变化上报与 60 秒在线判定不兼容 |
+| 床体数据为空 | 平台服务标识需为 `BedMonitor`，属性名与协议表逐字一致；旧名 `BedService` 已不再入库 |
+| 静置床体被显示为离线 | 两台设备是否按 2 秒周期上报；超过 60 秒无新数据会判离线 |
 | 时间范围查询漏数据 | 确认真实 `event_time` 是带时区的 ISO 8601，而不是未转换的 Unix 时间戳 |
 | 前端浏览器跨域失败 | 当前未配置 CORS，开发环境优先使用前端开发服务器代理 |
 
@@ -236,6 +267,6 @@ GET /api/v1/devices/env-01/history?metric=temperature&points=200
 
 1. 获取两台设备的真实 ID、上报样例、状态枚举和时间格式。
 2. 为床体增加周期心跳，完成静置、体动、断网和传感器异常联调。
-3. 接入 FSR 与真实在床判断，补充传感器故障状态。
+3. 接入第二路压力传感器，补全 `LYING` / `SITTING` 判断，并为两台设备增加时间窗合并。
 4. 增加推送幂等去重，并确定连续体动记录的片段合并规则。
 5. 由全组确认是否重新实施完整风扇闭环，再同步需求、硬件和后端开发。

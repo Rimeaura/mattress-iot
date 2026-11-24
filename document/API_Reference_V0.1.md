@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 |------|------|
-| 文档版本 | v0.1 |
+| 文档版本 | v0.2 |
 | 编写日期 | 2026-11-21 |
 | 编写人 | 成员4（后端） |
 | 适用范围 | 网页端查询后端数据、展示实时状态与历史曲线 |
@@ -30,16 +30,16 @@
 - **HTTP 状态码**：成功 200；参数错误 400；资源不存在 404；服务器内部错误 500
 - **鉴权**：当前**没有任何鉴权**，请只在局域网内调用
 - **时间格式**：所有时间字段为 ISO 8601 带时区文本（如 `2026-11-21T10:00:05+08:00`），前端传 `start`/`end` 时也必须使用该格式
-- **在线判定**：超过 **60 秒**（2 个上报周期）无数据即视为离线
+- **在线判定**：超过 **60 秒**无数据即视为离线
 
 ## 2. 接口一览
 
 | 方法 | 路径 | 用途 |
 |------|------|------|
 | GET | `/api/v1/devices` | 设备列表与在线状态 |
-| GET | `/api/v1/devices/{device_id}/latest` | 设备最新环境数据与卧床数据 |
+| GET | `/api/v1/devices/{device_id}/latest` | 设备最新环境数据与床体数据 |
 | GET | `/api/v1/devices/{device_id}/history` | 单指标历史曲线（降采样） |
-| GET | `/api/v1/bed/state` | 当前卧床状态 |
+| GET | `/api/v1/bed/state` | 当前床位状态 |
 | GET | `/api/v1/bed/events` | 体动事件列表 |
 
 > 规则配置（`/rules`）与控制记录（`/control-records`）接口已从后端移除，当前不可用。
@@ -60,7 +60,7 @@ GET /api/v1/devices
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `device_id` | string | 设备 ID，如 `bed-01`、`env-01` |
+| `device_id` | string | 设备 ID，如 `bed-pressure`、`bed-accel`、`env-01` |
 | `device_type` | string | `env`（环境）/ `bed`（床体）/ `combined`（两者都有） |
 | `online` | boolean | 是否有 60 秒内的上报 |
 | `last_seen_at` | string | 最后一次上报时间 |
@@ -73,10 +73,16 @@ GET /api/v1/devices
   "message": "ok",
   "data": [
     {
-      "device_id": "bed-01",
+      "device_id": "bed-pressure",
       "device_type": "bed",
       "online": true,
       "last_seen_at": "2026-11-21T20:45:49.451+08:00"
+    },
+    {
+      "device_id": "bed-accel",
+      "device_type": "bed",
+      "online": true,
+      "last_seen_at": "2026-11-21T20:45:49.960+08:00"
     },
     {
       "device_id": "env-01",
@@ -110,7 +116,7 @@ GET /api/v1/devices/{device_id}/latest
 | `online` | boolean | 在线状态 |
 | `last_seen_at` | string | 该设备最后一次上报时间 |
 | `env` | object \| null | 最新环境数据；床体设备为 `null` |
-| `bed` | object \| null | 最新卧床数据；环境设备为 `null` |
+| `bed` | object \| null | 最新床体数据；环境设备为 `null` |
 
 `env` 对象字段：
 
@@ -124,16 +130,30 @@ GET /api/v1/devices/{device_id}/latest
 | `event_time` | string \| null | 平台事件时间 |
 | `received_at` | string | 后端接收时间 |
 
-`bed` 对象字段：
+`bed` 对象字段（两台设备共用同一结构，未上报的字段为 `null`）：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `device_id` | string | 设备 ID |
-| `accel_x` / `accel_y` / `accel_z` | number \| null | 三轴加速度原始值 |
-| `motion_state` | string \| null | 床垫状态（静止/运动） |
-| `motion_count_10s` | number \| null | 近 10 秒体动次数 |
-| `motion_power_peak` | number \| null | 近 10 秒运动功率峰值 |
-| `event_time` | string \| null | 平台事件时间 |
+| `bed_state` | string \| null | 床位主状态，仅压力板有值 |
+| `load_presence` | string \| null | 负载判定，仅压力板有值 |
+| `confidence` | string \| null | 置信度，仅压力板有值 |
+| `last_event` | string \| null | 最近一次状态事件，仅压力板有值 |
+| `alert_type` | string \| null | 当前提示类型，仅压力板有值 |
+| `sensor_status` | string \| null | 自检状态，两块板都有 |
+| `head_shoulder_raw` | number \| null | 头肩路 ADC 原始码，仅压力板有值 |
+| `head_shoulder_net` | number \| null | 头肩路净压，仅压力板有值 |
+| `waist_hip_raw` | number \| null | 腰臀路 ADC 原始码，仅压力板有值 |
+| `waist_hip_net` | number \| null | 腰臀路净压，仅压力板有值 |
+| `total_net_pressure` | number \| null | 两路净压之和，仅压力板有值 |
+| `waist_hip_ratio` | number \| null | 腰臀净压占比，0–1，仅压力板有值 |
+| `last_event_sec` | number \| null | 最近事件发生在开机后第几秒，仅压力板有值 |
+| `run_sec` | number \| null | 开机至今秒数，两块板都有 |
+| `accel_x` / `accel_y` / `accel_z` | number \| null | 三轴加速度原始值，仅加速度板有值 |
+| `motion_peak_mg` | number \| null | 近 10 秒运动峰值，单位 0.001g，仅加速度板有值 |
+| `motion_state` | string \| null | `STILL` / `MOVING`，仅加速度板有值 |
+| `motion_count_10s` | number \| null | 近 10 秒体动次数，仅加速度板有值 |
+| `event_time` | string \| null | 平台事件时间，已统一为带时区的 ISO 8601 |
 | `received_at` | string | 后端接收时间 |
 
 **错误**：设备在两张表中都没有数据时返回 404。
@@ -167,8 +187,14 @@ GET /api/v1/devices/{device_id}/history
 | `light` | lux | 光照 |
 | `env_status` | 无 | 环境节点状态 |
 | `accel_x` / `accel_y` / `accel_z` | 无 | 三轴加速度 |
-| `motion_power_peak` | 无 | 运动功率峰值 |
+| `motion_peak_mg` | 0.001g | 近 10 秒运动峰值 |
 | `motion_count_10s` | 次 | 近 10 秒体动次数 |
+| `head_shoulder_raw` / `head_shoulder_net` | 码 | 头肩路原始码 / 净压 |
+| `waist_hip_raw` / `waist_hip_net` | 码 | 腰臀路原始码 / 净压 |
+| `total_net_pressure` | 码 | 两路净压之和 |
+| `waist_hip_ratio` | 无 | 腰臀净压占比，0–1 |
+| `run_sec` | 秒 | 开机至今秒数 |
+| `last_event_sec` | 秒 | 最近事件发生在开机后第几秒 |
 
 **响应 `data`**：
 
@@ -212,7 +238,7 @@ GET /api/v1/devices/env-01/history?metric=temperature&start=2026-11-21T00:00:00%
 
 ---
 
-### 3.4 获取卧床状态
+### 3.4 获取床位状态
 
 ```
 GET /api/v1/bed/state
@@ -220,23 +246,68 @@ GET /api/v1/bed/state
 
 | 参数 | 位置 | 必填 | 说明 |
 |------|------|------|------|
-| `device_id` | query | 否 | 不传时取最近一次卧床上报的设备 |
+| `device_id` | query | 否 | 不传时分别取压力板、加速度板各自最新一帧 |
 
 **响应 `data`**：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `device_id` | string | 设备 ID |
-| `bed_state` | string | `in_bed` / `out_of_bed` |
-| `online` | boolean | 在线状态 |
-| `last_report_at` | string | 最近上报时间 |
-| `motion_state` | string \| null | 最近上报的床垫状态 |
-| `motion_count_10s` | number \| null | 近 10 秒体动次数 |
-| `motion_power_peak` | number \| null | 近 10 秒运动功率峰值 |
+| `device_id` | string | 设备 ID，缺省时取压力板设备 |
+| `bed_state` | string \| null | 压力板上报的床位主状态原值：`OUT_BED` / `IN_BED_UNKNOWN` / `LYING` / `SITTING` / `UNKNOWN` |
+| `online` | boolean | 在线状态，按较新一侧的接收时间判断 |
+| `last_seen_at` | string | 较新一侧的最后上报时间 |
+| `pressure` | object \| null | 压力板最新一帧，无数据时为 `null` |
+| `accel` | object \| null | 加速度板最新一帧，无数据时为 `null` |
 
-**错误**：没有任何卧床数据时返回 404。
+`pressure` 与 `accel` 的字段与 3.2 的 `bed` 对象一致，各自只填充本设备的字段，另一侧字段为 `null`。
 
-> **重要说明**：FSR 压力传感器尚未接入，`bed_state` 目前按"最近上报是否在 60 秒在线窗口内"近似判定，还不能真正区分"在床静止"与"离床"。前端展示时建议同时显示 `online` 和 `motion_state`，避免误解。
+**示例**
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "device_id": "bed-pressure",
+    "bed_state": "IN_BED_UNKNOWN",
+    "online": true,
+    "last_seen_at": "2026-11-24T21:04:29.053+08:00",
+    "pressure": {
+      "device_id": "bed-pressure",
+      "bed_state": "IN_BED_UNKNOWN",
+      "load_presence": "PRESENT",
+      "confidence": "MEDIUM",
+      "last_event": "BED_IN",
+      "alert_type": "NONE",
+      "sensor_status": "OK",
+      "head_shoulder_raw": 962,
+      "head_shoulder_net": 810,
+      "total_net_pressure": 810,
+      "waist_hip_ratio": 0.0,
+      "run_sec": 412,
+      "event_time": "2026-11-24T10:10:10+00:00",
+      "received_at": "2026-11-24T21:04:28.999+08:00"
+    },
+    "accel": {
+      "device_id": "bed-accel",
+      "sensor_status": "OK",
+      "accel_x": 4120,
+      "accel_y": -2380,
+      "accel_z": 1640,
+      "motion_peak_mg": 168,
+      "motion_state": "MOVING",
+      "motion_count_10s": 2,
+      "run_sec": 417,
+      "event_time": "2026-11-24T10:10:14+00:00",
+      "received_at": "2026-11-24T21:04:29.053+08:00"
+    }
+  }
+}
+```
+
+**错误**：两台设备都没有数据时返回 404。
+
+> 说明：两台设备每 2 秒各自上报，周期不同步。当前实现各取最新一帧返回，不做时间窗合并；某一侧没有数据就是 `null`，前端需分别判空。
 
 ---
 
@@ -266,9 +337,9 @@ GET /api/v1/bed/events
 |------|------|------|
 | `id` | number | 记录 ID |
 | `device_id` | string | 设备 ID |
-| `motion_state` | string | 触发时的床垫状态 |
+| `motion_state` | string | 固定为 `MOVING` |
 | `motion_count_10s` | number \| null | 近 10 秒体动次数 |
-| `motion_power_peak` | number \| null | 近 10 秒运动功率峰值（强度） |
+| `motion_peak_mg` | number \| null | 近 10 秒运动峰值，单位 0.001g |
 | `event_time` | string \| null | 平台事件时间 |
 | `received_at` | string | 后端接收时间 |
 
@@ -283,19 +354,19 @@ GET /api/v1/bed/events
     "items": [
       {
         "id": 1,
-        "device_id": "bed-01",
-        "motion_state": "运动",
-        "motion_count_10s": 3,
-        "motion_power_peak": 8.5,
-        "event_time": "2026-11-21T10:00:05+08:00",
-        "received_at": "2026-11-21T10:00:06.123+08:00"
+        "device_id": "bed-accel",
+        "motion_state": "MOVING",
+        "motion_count_10s": 2,
+        "motion_peak_mg": 168,
+        "event_time": "2026-11-24T10:10:14+00:00",
+        "received_at": "2026-11-24T21:04:29.053+08:00"
       }
     ]
   }
 }
 ```
 
-> 当前事件按单条"运动"上报记录返回，同一段持续运动会生成多条；暂未做片段合并（见 Known Issues Q-17）。
+> 当前事件按单条 `motion_state = MOVING` 的上报记录返回，同一段持续运动会生成多条；暂未做片段合并（见 Known Issues Q-17）。
 
 ---
 
@@ -304,14 +375,14 @@ GET /api/v1/bed/events
 ```json
 { "code": 400, "message": "不支持的 metric: co2，可选: ...", "data": null }
 { "code": 400, "message": "参数校验失败: query.metric Field required", "data": null }
-{ "code": 404, "message": "无卧床数据", "data": null }
+{ "code": 404, "message": "无床体数据", "data": null }
 { "code": 500, "message": "服务器内部错误", "data": null }
 ```
 
 | 状态码 | 典型场景 |
 |---|---|
 | 400 | 缺少必填参数、`metric` 非法、时间格式错误、`start > end`、`points`/`limit` 越界 |
-| 404 | 设备无任何数据、无卧床数据、路径不存在 |
+| 404 | 设备无任何数据、无床体数据、路径不存在 |
 | 500 | 后端未捕获异常（详情只写后端日志） |
 
 ---
@@ -338,6 +409,8 @@ export default {
 4. **空数据处理**：`latest` 会 404；`history` 返回空数组；`events` 返回 `total: 0`。三种情况请分别展示"无数据/未上报"，不要显示 0 值或旧值。
 5. **离线展示**：`online=false` 时必须显式提示离线，不要继续展示旧的实时值（对应 FR-13、NFR-07）。
 6. **字段可空**：传感器某个属性未上报时对应字段为 `null`，渲染前需判空。
+7. **两台设备**：`/bed/state` 的 `pressure` 与 `accel` 可能一侧为 `null`，表示该设备当前没有数据；不要把 `null` 当成 0。
+8. **状态映射**：`bed_state` 返回固件原值（`IN_BED_UNKNOWN` 等），中文展示由前端自行映射。
 
 ---
 
@@ -346,3 +419,4 @@ export default {
 | 版本 | 日期 | 变更 |
 |------|------|------|
 | v0.1 | 2026-11-21 | 首版；覆盖 5 个查询接口，移除规则与控制记录接口 |
+| v0.2 | 2026-11-24 | 适配 `BedMonitor` 双设备模型：新增压力板字段与 `motion_peak_mg`，`/bed/state` 改为返回 `bedState` 原值及 `pressure` / `accel` 两块，体动事件改为 `MOVING`（文件名仍为 V0.1） |

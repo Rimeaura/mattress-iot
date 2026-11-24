@@ -1,5 +1,5 @@
-"""
-前端查询接口 /api/v1/*（FR-11）。
+"""前端查询接口 /api/v1/*（FR-11）。
+
 统一响应体：``{"code": 0, "message": "ok", "data": ...}``；
 出错时 ``code`` 取 HTTP 状态码（400/404/500），``data`` 为 null。
 """
@@ -103,7 +103,7 @@ def list_devices():
 def latest_data(device_id: str):
     """设备最新一条环境数据与卧床数据。"""
     env = storage.query_latest(device_id, "env_readings")
-    bed = storage.query_latest(device_id, "bed_readings")
+    bed = storage.query_latest(device_id, "bed_monitor_readings")
     if env is None and bed is None:
         raise HTTPException(status_code=404, detail=f"设备 {device_id} 无上报数据")
     last_seen_at = max(
@@ -151,28 +151,25 @@ def history(
 
 @router.get("/bed/state")
 def bed_state(device_id: Optional[str] = Query(None, description="设备 ID，缺省取最近上报")):
-    """卧床状态。
+    """床位状态。
 
-    说明：FSR 压力传感器未接入时，无法仅凭 motionState 区分“在床静止”与“离床”，
-    这里用“最近一次卧床数据是否仍在在线超时窗口内”近似判定（变化点记录待实现）。
+    压力板提供 bedState，加速度板提供运动信息。两台设备异步上报，
+    这里各取最新一帧原样返回；某一侧没有数据时对应字段为 null。
     """
-    record = (
-        storage.query_latest(device_id, "bed_readings")
-        if device_id
-        else storage.query_latest_any("bed_readings")
-    )
-    if record is None:
-        raise HTTPException(status_code=404, detail="无卧床数据")
-    online = _is_online(record["received_at"])
+    pressure = storage.query_latest_bed(device_id, "bed_state")
+    accel = storage.query_latest_bed(device_id, "accel_x")
+    if pressure is None and accel is None:
+        raise HTTPException(status_code=404, detail="无床体数据")
+    records = [record for record in (pressure, accel) if record is not None]
+    last_seen_at = max(record["received_at"] for record in records)
     return _ok(
         {
-            "device_id": record["device_id"],
-            "bed_state": "in_bed" if online else "out_of_bed",
-            "online": online,
-            "last_report_at": record["received_at"],
-            "motion_state": record["motion_state"],
-            "motion_count_10s": record["motion_count_10s"],
-            "motion_power_peak": record["motion_power_peak"],
+            "device_id": device_id or records[0]["device_id"],
+            "bed_state": pressure["bed_state"] if pressure else None,
+            "online": _is_online(last_seen_at),
+            "last_seen_at": last_seen_at,
+            "pressure": pressure,
+            "accel": accel,
         }
     )
 
